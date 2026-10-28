@@ -24,6 +24,9 @@ def test_golden_writes_manifest_and_wavs(tmp_path):
     on_disk = json.loads((tmp_path / "manifest.json").read_text())
     assert on_disk["sample_rate"] == 16000
     assert {r["case"] for r in manifest["renders"]} >= {"pitch_up", "reverb", "preset_minion"}
+    # Cases record what actually rendered: the laugh is off even for goofy.
+    assert manifest["cases"]["preset_goofy"]["laugh.enabled"] is False
+    assert manifest["cases"]["pitch_up"]["distortion.enabled"] is False
     for r in manifest["renders"]:
         sr, y = read_wav(os.path.join(tmp_path, r["file"]))
         _, x = read_wav(os.path.join(tmp_path, r["input"]))

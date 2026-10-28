@@ -70,8 +70,30 @@ def test_params_override_preset():
 
 
 def test_laugh_off_unless_requested():
-    assert VoiceFilter(SR, preset="goofy")._effect.laugh_enabled is False
-    assert VoiceFilter(SR, preset="goofy", laugh=True)._effect.laugh_enabled is True
+    goofy = VoiceFilter(SR, preset="goofy")
+    assert goofy._effect.laugh_enabled is False
+    assert goofy.values["laugh.enabled"] is False  # values report what's in effect
+    # laugh=True turns it on, whatever the preset says.
+    assert VoiceFilter(SR, preset="scary", laugh=True)._effect.laugh_enabled is True
+    assert VoiceFilter(SR, laugh=True)._effect.laugh_enabled is True
+
+
+def test_no_preset_is_the_unchanged_voice():
+    # Neutral baseline, not MinionEffect's +8.5-semitone construction default.
+    assert _dominant(render(_tone(), SR)) == pytest.approx(200, rel=0.03)
+    growl_only = VoiceFilter(SR, params={"growl.enabled": True, "growl.depth": 0.3})
+    assert growl_only._effect.max_semitones == 0.0
+
+
+@pytest.mark.parametrize("text, want", [("False", False), ("false", False), ("0", False), ("true", True), (1, True)])
+def test_bool_params_parse_strictly(text, want):
+    assert VoiceFilter(SR, params={"distortion.enabled": text})._effect.distortion_enabled is want
+
+
+@pytest.mark.parametrize("params", [{"distortion.enabled": "maybe"}, {"shuffle.shuffle_k": 2.9}, {"reverb.mix": "loud"}])
+def test_malformed_values_rejected(params):
+    with pytest.raises(ValueError):
+        VoiceFilter(SR, params=params)
 
 
 @pytest.mark.parametrize(
@@ -122,4 +144,27 @@ def test_render_cli_rejects_unknown_param(tmp_path):
         [sys.executable, "-m", "voicepranks.render", str(src), str(tmp_path / "o.wav"), "--param", "bogus=1"],
         capture_output=True, text=True,
     )
-    assert proc.returncode != 0 and "bogus" in proc.stderr
+    assert proc.returncode != 0 and "error: unknown param: 'bogus'" in proc.stderr
+
+
+def test_render_cli_bool_param_false_turns_stage_off(tmp_path):
+    src, dst = tmp_path / "in.wav", tmp_path / "out.wav"
+    write_wav(str(src), SR, _tone(0.3))
+    subprocess.run(
+        [sys.executable, "-m", "voicepranks.render", str(src), str(dst), "--preset", "scary",
+         "--param", "distortion.enabled=False", "--param", "growl.enabled=False",
+         "--param", "reverb.enabled=False", "--param", "effect.eq_enabled=False"],
+        check=True, capture_output=True,
+    )
+    _, y = read_wav(str(dst))
+    assert np.allclose(y, render(read_wav(str(src))[1], SR, params={"effect.max_semitones": -7.0}), atol=1e-4)
+
+
+def test_render_cli_unreadable_wav_is_a_clean_error(tmp_path):
+    bad = tmp_path / "bad.wav"
+    bad.write_bytes(b"not a wav")
+    proc = subprocess.run(
+        [sys.executable, "-m", "voicepranks.render", str(bad), str(tmp_path / "o.wav")],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 2 and "can't read" in proc.stderr and "Traceback" not in proc.stderr

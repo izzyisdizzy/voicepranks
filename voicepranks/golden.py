@@ -13,7 +13,9 @@ Writes into OUTDIR:
     sample-exact (the gibberish engines' RNG).
 
 Cases isolate each stage of the plain path (pitch, EQ, growl, distortion,
-nasal bands, reverb) and then cover every preset. Inputs are quantized to
+nasal bands, reverb) on the neutral baseline, then cover every preset. Each
+case's params in the manifest are the filter's effective values (baseline
+filled in, laugh off), exactly what was rendered. Inputs are quantized to
 16-bit *before* rendering, so a port that reads `input__*.wav` back sees
 exactly the samples the reference processed.
 """
@@ -29,7 +31,7 @@ import numpy as np
 from . import __version__
 from .api import VoiceFilter, render
 from .audio.wavio import read_wav, write_wav
-from .presets import PRESETS, NEUTRAL
+from .presets import PRESETS
 
 _ENV_MS = 20.0
 
@@ -78,8 +80,12 @@ def _rms_envelope(signal: np.ndarray, sample_rate: int) -> List[float]:
 
 def write_golden(outdir: str, sample_rate: int = 48000, seconds: float = 1.0) -> Dict[str, Any]:
     os.makedirs(outdir, exist_ok=True)
-    cases: Dict[str, Dict[str, Any]] = {name: {**NEUTRAL, **p} for name, p in STAGE_CASES.items()}
-    cases.update({f"preset_{name}": dict(values) for name, values in PRESETS.items()})
+    requested: Dict[str, Dict[str, Any]] = dict(STAGE_CASES)
+    requested.update({f"preset_{name}": dict(values) for name, values in PRESETS.items()})
+    # Record each case as the filter actually runs it (neutral baseline filled
+    # in, laugh forced off), so the manifest describes exactly what rendered.
+    filters = {case: VoiceFilter(sample_rate, params=p) for case, p in requested.items()}
+    cases = {case: dict(vf.values) for case, vf in filters.items()}
 
     renders = []
     for sig_name, sig in _signals(sample_rate, seconds).items():
@@ -95,7 +101,7 @@ def write_golden(outdir: str, sample_rate: int = 48000, seconds: float = 1.0) ->
                 "signal": sig_name,
                 "input": os.path.basename(in_path),
                 "file": file,
-                "latency_samples": VoiceFilter(sample_rate, params=params).latency_samples,
+                "latency_samples": filters[case].latency_samples,
                 "dominant_hz": round(_dominant_hz(out, sample_rate), 3),
                 "rms_envelope": _rms_envelope(out, sample_rate),
             })

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import wave
 from typing import Any, Dict, Optional
 
 from .api import preset_names, render
@@ -57,11 +58,15 @@ def main(argv: Optional[list] = None) -> None:
             parser.error(f"--param expects NAME=VALUE, got {item!r}")
         params[name.strip()] = _parse_value(value.strip())
 
-    sample_rate, mono = read_wav(args.input)
+    try:
+        sample_rate, mono = read_wav(args.input)
+    except (OSError, EOFError, ValueError, wave.Error) as e:
+        parser.error(f"can't read {args.input}: {e} (convert with ffmpeg -c:a pcm_s16le, see --help)")
     try:
         out = render(mono, sample_rate, preset=args.preset, params=params, tail_s=args.tail_s)
     except (KeyError, ValueError) as e:
-        parser.error(str(e))
+        # KeyError's str() is its repr; show the message itself.
+        parser.error(e.args[0] if e.args else str(e))
     write_wav(args.output, sample_rate, out)
     print(f"{args.input} -> {args.output}: {out.shape[0] / sample_rate:.2f} s @ {sample_rate} Hz")
 

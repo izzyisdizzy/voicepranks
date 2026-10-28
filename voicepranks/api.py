@@ -28,7 +28,7 @@ import numpy as np
 
 from .dsp.effect import MinionEffect
 from .params import PARAM_SPECS_BY_NAME, build_effect_registry
-from .presets import get_preset, preset_names
+from .presets import NEUTRAL, get_preset, preset_names
 
 __all__ = ["VoiceFilter", "render", "preset_names"]
 
@@ -40,14 +40,35 @@ _RENDER_BLOCK = 1024
 _MAX_FLUSH_S = 5.0
 
 
+_TRUE = {"true", "1", "yes", "on"}
+_FALSE = {"false", "0", "no", "off"}
+
+
 def _coerce(name: str, value: Any) -> Any:
-    """Validate one param against its spec and coerce it to the spec's kind."""
+    """Validate one param against its spec and coerce it to the spec's kind.
+    Strict: a bool must be a bool, 0/1, or a true/false word (so the string
+    "False" is False, not truthy), and an int must be integral."""
     spec = PARAM_SPECS_BY_NAME.get(name)
     if spec is None:
         raise KeyError(f"unknown param: {name!r}")
     if spec.kind == "bool":
-        return bool(value)
-    v = int(value) if spec.kind == "int" else float(value)
+        if isinstance(value, str):
+            word = value.strip().lower()
+            if word in _TRUE or word in _FALSE:
+                return word in _TRUE
+        elif isinstance(value, (bool, int, float)) and value in (0, 1):
+            return bool(value)
+        raise ValueError(f"param {name!r} expects a bool, got {value!r}")
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"param {name!r} expects a number, got {value!r}") from None
+    if spec.kind == "int":
+        if not f.is_integer():
+            raise ValueError(f"param {name!r} expects an integer, got {value!r}")
+        v: Any = int(f)
+    else:
+        v = f
     if not (spec.min <= v <= spec.max):
         raise ValueError(f"param {name!r}={v} outside [{spec.min}, {spec.max}]")
     return v
@@ -58,13 +79,18 @@ class VoiceFilter:
 
     `process()` takes mono float32 samples in [-1, 1] at `sample_rate` and
     returns processed samples. The effect buffers internally (WSOLA, the
-    gibberish engines), so a call can return fewer, more, or zero samples;
-    over a whole stream the output is time-aligned with the input -- it
-    starts at input sample 0 and just trails it by up to `latency_samples`.
+    gibberish engines), so a call can return fewer, more, or zero samples.
+    The output stream begins at input time 0 (no leading silence), but the
+    WSOLA search places content a few hundred samples late (~8 ms on the plain
+    path; the shuffle engine reorders chunks outright) -- so give `render` a
+    small `tail_s` if the very end of a clip matters.
 
-    Intensity is fixed at 1.0 (the full preset character). The random laugh
-    overlay is off unless `laugh=True`: it fires on a time-spent-talking timer and
-    can read a user-recorded clip from `~/.voicepranks`, neither of which
+    Settings start from a neutral baseline (`presets.NEUTRAL`: plain voice,
+    every effect off), then the preset, then `params` -- so no preset and no
+    params is the unchanged voice. Intensity is fixed at 1.0 (the full preset
+    character). The random laugh is forced off unless `laugh=True`, which
+    forces it on: it fires on a time-spent-talking timer and plays a
+    user-recorded clip from `~/.voicepranks` if there is one, neither of which
     belongs in a reproducible render.
     """
 
@@ -76,10 +102,14 @@ class VoiceFilter:
         laugh: bool = False,
     ) -> None:
         self.sample_rate = int(sample_rate)
-        values: Dict[str, Any] = dict(get_preset(preset)) if preset else {}
-        for name, value in (params or {}).items():
-            values[name] = value
-        self.values = {name: _coerce(name, v) for name, v in values.items()}
+        values: Dict[str, Any] = dict(NEUTRAL)
+        if preset:
+            values.update(get_preset(preset))
+        values.update(params or {})
+        values = {name: _coerce(name, v) for name, v in values.items()}
+        values["laugh.enabled"] = bool(laugh)
+        # The settings actually in effect, laugh override included.
+        self.values = values
 
         self._effect = MinionEffect(self.sample_rate)
         registry = build_effect_registry(self._effect)
@@ -90,8 +120,6 @@ class VoiceFilter:
                 registry[name].set(value)
             else:
                 raise KeyError(f"param {name!r} is engine/session state, not part of the effect")
-        if not laugh:
-            self._effect.set_laugh_enabled(False)
         self._effect.set_intensity(1.0)
 
     @property
@@ -111,9 +139,12 @@ class VoiceFilter:
 
     def flush(self) -> np.ndarray:
         """Return the samples still buffered inside the effect by feeding it
-        silence for `latency_samples` (plus one block of slack). Call at the
-        end of a stream; the filter can be reused afterwards via `reset()`."""
-        need = self.latency_samples + _RENDER_BLOCK
+        silence for `latency_samples` plus slack for what the latency figure
+        doesn't model (the resampler backlog, the shuffle wobble's delay line).
+        Call at the end of a stream; the filter can be reused afterwards via
+        `reset()`."""
+        pitch = self._effect.pitch
+        need = self.latency_samples + pitch.L + 2 * pitch.tol + _RENDER_BLOCK
         silence = np.zeros(_RENDER_BLOCK, dtype=np.float32)
         out = [self._effect.process(silence) for _ in range(-(-need // _RENDER_BLOCK))]
         return np.concatenate(out) if out else np.zeros(0, dtype=np.float32)
@@ -133,8 +164,9 @@ def render(
 ) -> np.ndarray:
     """Render a whole clip through a fresh `VoiceFilter`.
 
-    Returns `len(mono) + tail_s * sample_rate` samples, time-aligned with the
-    input. Use `tail_s` to keep a reverb tail ringing past the dry clip's end.
+    Returns `len(mono) + tail_s * sample_rate` samples starting at input time
+    0 (see `VoiceFilter` on the few-ms WSOLA offset). Use `tail_s` to keep a
+    reverb tail ringing past the dry clip's end, or the last few ms of speech.
     Deterministic: the same input and settings always give the same output.
     """
     vf = VoiceFilter(sample_rate, preset=preset, params=params)

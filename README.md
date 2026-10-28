@@ -211,6 +211,46 @@ python -m voicepranks.selftest in.wav out.wav --semitones 8 --eq-db 8
 If no input WAV is given, a 2-second synthetic test tone (200 Hz with a
 little vibrato) is generated and processed instead.
 
+## Use it from another program (embedding API)
+
+`voicepranks.api` is the supported surface for using the effect outside the
+app -- rendering sound effects for a game, batch-processing clips, or
+driving it from your own audio loop. It is pure numpy and never imports
+`sounddevice`.
+
+```python
+from voicepranks.api import VoiceFilter, render
+
+out = render(mono, 48000, preset="scary", tail_s=1.0)   # whole clip, same length (+ tail)
+
+vf = VoiceFilter(48000, preset="minion", params={"shuffle.semitones": 7})
+for block in blocks:
+    sink(vf.process(block))   # output length varies per call; it's buffered
+sink(vf.flush())              # drain what's still inside the effect
+```
+
+Params use the `PARAM_SPECS` names and override the preset. Intensity is
+fixed at full, and the random laugh is off unless you pass `laugh=True`.
+
+The same thing from the shell (16-bit WAV in, mono 16-bit WAV out; convert
+other formats with ffmpeg first):
+
+```
+ffmpeg -i clip.mp3 -ac 1 -ar 48000 -c:a pcm_s16le clip.wav
+python -m voicepranks.render clip.wav out.wav --preset scary --param effect.max_semitones=-5 --tail-s 1
+```
+
+**Porting the effect to another language.** Two tools keep a port honest:
+
+```
+python -m voicepranks.export_spec spec.json   # PARAM_SPECS + PRESETS as JSON
+python -m voicepranks.golden golden/          # reference renders + manifest.json
+```
+
+`golden/` holds test signals, every DSP stage and preset rendered through
+them, and per-render features (latency, dominant frequency, RMS envelope)
+to compare against where a port can't be sample-exact.
+
 ## Troubleshooting
 
 **Blank / empty window on macOS.** Apple's *system* Python (`/usr/bin/python3`)
@@ -251,4 +291,8 @@ voicepranks/
   control_server.py stdlib HTTP JSON control API
   server.py         headless entrypoint (`python -m voicepranks.server`)
   selftest.py       CLI WAV-file audition tool
+  api.py            embedding API (VoiceFilter, render) -- no sounddevice
+  render.py         CLI: render a WAV through a preset/params
+  export_spec.py    CLI: PARAM_SPECS + PRESETS as JSON (for ports)
+  golden.py         CLI: golden reference renders (for ports)
 ```

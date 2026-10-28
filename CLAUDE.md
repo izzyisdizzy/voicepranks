@@ -30,6 +30,12 @@ input. Tech decisions, and why:
 - `voicepranks/ui/app.py` — Tkinter GUI. `control_server.py` + `webui/` — the
   HTTP control surface. Both drive the engine *only* through `PARAM_SPECS`.
 - `voicepranks/presets.py` — curated `{param: value}` bundles of sound character.
+- `voicepranks/api.py` — the **public embedding API** (`VoiceFilter`, `render`)
+  for other programs. Its first consumer is `flag-abduction`, for baked SFX
+  and possessed-minion voice chat. CLIs built on it:
+  - `render.py`: WAV → WAV.
+  - `export_spec.py`: `PARAM_SPECS` + `PRESETS` as JSON.
+  - `golden.py`: reference renders that ports are tested against.
 - `tests/` — pytest, one module per concern.
 - `build-macos.sh`, `build-windows.ps1`, `voicepranks.spec`, `DISTRIBUTING.md` —
   the PyInstaller bundle pipeline.
@@ -66,4 +72,15 @@ pytest tests/test_pitch.py -k wsola # one area
   in the shipped app. Any new asset goes through the resolver *and* the spec.
 - **Defaults keep the plain voice unchanged.** `Distortion` and `Reverb` are off
   by default; the "scary" preset is what turns them on alongside a negative
-  `max_semitones`.
+  `max_semitones`. `api.VoiceFilter` starts from `presets.NEUTRAL`, so no
+  preset means the unchanged voice there too.
+- **`api.py` never imports `sounddevice`.** It is pure numpy, so callers need
+  no audio device; `tests/test_api.py` enforces this.
+- **Params and presets are a contract with ports.** `flag-abduction`'s C# port
+  (`Voice/Fx/`) is tested bit-exact against this repo's DSP. If you change a
+  preset, a param range, or any DSP stage, regenerate the files there:
+  ```sh
+  python -m voicepranks.export_spec <fa>/src/FlagAbduction.Frontend.Godot/Voice/Fx/voicepranks-spec.json
+  python -m voicepranks.golden <fa>/tests/FlagAbduction.Frontend.Godot.Tests/Voice/Fx/Golden
+  ```
+  Then update the port so its tests pass again.
